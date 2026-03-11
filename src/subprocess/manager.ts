@@ -136,6 +136,8 @@ export class ClaudeSubprocess extends EventEmitter {
       "--include-partial-messages", // Enable streaming chunks
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
+      "--permission-mode",
+      "bypassPermissions", // Full system access, no sandbox restrictions
       "--no-session-persistence", // Don't save sessions
       prompt, // Pass prompt as argument (more reliable than stdin)
     ];
