@@ -47,6 +47,24 @@ export function extractModel(model: string): ClaudeModel {
 }
 
 /**
+ * Extract text from a message content field.
+ * Handles both plain string and OpenAI array-of-parts format:
+ *   "hello"  OR  [{"type":"text","text":"hello"}, {"type":"image_url",...}]
+ */
+function extractContent(content: OpenAIChatRequest["messages"][number]["content"]): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text!)
+      .join("\n");
+  }
+  return String(content ?? "");
+}
+
+/**
  * Convert OpenAI messages array to a single prompt string for Claude CLI
  *
  * Claude Code CLI in --print mode expects a single prompt, not a conversation.
@@ -56,20 +74,21 @@ export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): strin
   const parts: string[] = [];
 
   for (const msg of messages) {
+    const text = extractContent(msg.content);
     switch (msg.role) {
       case "system":
         // System messages become context instructions
-        parts.push(`<system>\n${msg.content}\n</system>\n`);
+        parts.push(`<system>\n${text}\n</system>\n`);
         break;
 
       case "user":
         // User messages are the main prompt
-        parts.push(msg.content);
+        parts.push(text);
         break;
 
       case "assistant":
         // Previous assistant responses for context
-        parts.push(`<previous_response>\n${msg.content}\n</previous_response>\n`);
+        parts.push(`<previous_response>\n${text}\n</previous_response>\n`);
         break;
     }
   }
