@@ -38,7 +38,7 @@ Your App (Clawdbot, etc.)
 - **Streaming support** — Real-time token streaming via Server-Sent Events
 - **Multiple models** — Claude Opus, Sonnet, and Haiku
 - **Session management** — Maintains conversation context
-- **Auto-start service** — Optional LaunchAgent for macOS
+- **Auto-start service** — Optional LaunchAgent (macOS) or systemd unit (Linux)
 - **Zero configuration** — Uses existing Claude CLI authentication
 - **Secure by design** — Uses spawn() to prevent shell injection
 
@@ -146,6 +146,59 @@ Add to your Continue config:
 }
 ```
 
+### OpenClaw
+
+[OpenClaw](https://openclaw.ai) is an autonomous AI agent platform. To use this provider as a model inside OpenClaw, add the following to your `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "env": {
+    "OPENAI_API_KEY": "not-needed",
+    "OPENAI_BASE_URL": "http://localhost:3456/v1"
+  },
+  "models": {
+    "providers": {
+      "openai": {
+        "baseUrl": "http://localhost:3456/v1",
+        "api": "openai-completions",
+        "apiKey": "OPENAI_API_KEY",
+        "models": [
+          {
+            "id": "claude-opus-4",
+            "name": "Claude Opus 4",
+            "contextWindow": 200000,
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-sonnet-4",
+            "name": "Claude Sonnet 4",
+            "contextWindow": 200000,
+            "maxTokens": 16384
+          },
+          {
+            "id": "claude-haiku-4",
+            "name": "Claude Haiku 4",
+            "contextWindow": 200000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/claude-sonnet-4"
+      }
+    }
+  }
+}
+```
+
+Then restart OpenClaw. The proxy models will appear as `openai/claude-sonnet-4`, `openai/claude-opus-4`, etc. To select a model for the current session, use `/model openai/claude-sonnet-4`.
+
+> **Note:** `OPENAI_API_KEY` can be any non-empty string — the proxy ignores it. `OPENAI_BASE_URL` must point to the running proxy.
+
 ### Generic OpenAI Client (Python)
 
 ```python
@@ -162,9 +215,89 @@ response = client.chat.completions.create(
 )
 ```
 
-## Auto-Start on macOS
+## Auto-Start
+
+### macOS
 
 Create a LaunchAgent to start the provider automatically on login. See `docs/macos-setup.md` for detailed instructions.
+
+### Linux (systemd)
+
+Create a user-level systemd service so the proxy starts automatically on login/boot:
+
+1. Create the service file:
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/claude-max-proxy.service << 'EOF'
+[Unit]
+Description=Claude Max API Proxy (OpenAI-compatible)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /path/to/claude-max-api-proxy/dist/server/standalone.js
+Restart=on-failure
+RestartSec=5
+Environment=HOME=%h
+Environment=PATH=%h/.nvm/versions/node/v25.8.1/bin:/usr/local/bin:/usr/bin:/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+```
+
+2. **Edit the file** and replace `/path/to/claude-max-api-proxy` with the actual path (e.g. `/home/mark/hireloom-workspace/claude-max-api-proxy`). Also update the `node` path and the `PATH` to match your system (check with `which node` and `which claude`).
+
+3. Enable and start the service:
+
+```bash
+# Reload systemd, enable, and start
+systemctl --user daemon-reload
+systemctl --user enable claude-max-proxy
+systemctl --user start claude-max-proxy
+
+# Verify it's running
+systemctl --user status claude-max-proxy
+curl http://localhost:3456/health
+```
+
+4. To ensure the service keeps running after logout (e.g. on a server/Pi), enable lingering:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+#### Management Commands
+
+```bash
+# Check status
+systemctl --user status claude-max-proxy
+
+# View live logs
+journalctl --user -u claude-max-proxy -f
+
+# Restart
+systemctl --user restart claude-max-proxy
+
+# Stop
+systemctl --user stop claude-max-proxy
+
+# Disable autostart
+systemctl --user disable claude-max-proxy
+```
+
+#### Uninstall
+
+```bash
+systemctl --user stop claude-max-proxy
+systemctl --user disable claude-max-proxy
+rm ~/.config/systemd/user/claude-max-proxy.service
+systemctl --user daemon-reload
+```
 
 ## Architecture
 
