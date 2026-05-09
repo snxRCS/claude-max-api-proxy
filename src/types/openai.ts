@@ -16,7 +16,8 @@ export interface OpenAIChatMessage {
 
 export interface OpenAIChatRequest {
   model: string;
-  messages: OpenAIChatMessage[];
+  messages?: OpenAIChatMessage[];
+  input?: OpenAIChatMessage[]; // Alias for messages used by some OpenClaw adapters
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;

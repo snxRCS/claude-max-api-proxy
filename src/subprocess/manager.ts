@@ -15,7 +15,7 @@ import type {
   ClaudeCliResult,
   ClaudeCliStreamEvent,
 } from "../types/claude-cli.js";
-import { isAssistantMessage, isResultMessage, isContentDelta } from "../types/claude-cli.js";
+import { isAssistantMessage, isResultMessage, isStreamEvent } from "../types/claude-cli.js";
 import type { ClaudeModel } from "../adapter/openai-to-cli.js";
 
 export interface SubprocessOptions {
@@ -34,7 +34,7 @@ export interface SubprocessEvents {
   raw: (line: string) => void;
 }
 
-const DEFAULT_TIMEOUT = 300000; // 5 minutes
+const DEFAULT_TIMEOUT = 1800000; // 30 minutes
 
 export class ClaudeSubprocess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -46,7 +46,7 @@ export class ClaudeSubprocess extends EventEmitter {
    * Start the Claude CLI subprocess with the given prompt
    */
   async start(prompt: string, options: SubprocessOptions): Promise<void> {
-    const args = this.buildArgs(prompt, options);
+    const args = this.buildArgs("", options); // Don't pass prompt here
     const timeout = options.timeout || DEFAULT_TIMEOUT;
 
     return new Promise((resolve, reject) => {
@@ -54,9 +54,15 @@ export class ClaudeSubprocess extends EventEmitter {
         // Use spawn() for security - no shell interpretation
         this.process = spawn("claude", args, {
           cwd: options.cwd || process.cwd(),
-          env: { ...process.env },
+          env: { ...process.env, CLAUDE_SESSION_ID: options.sessionId || "" },
           stdio: ["pipe", "pipe", "pipe"],
         });
+
+        // Write prompt to stdin and close it
+        if (this.process.stdin) {
+          this.process.stdin.write(prompt + "\n");
+          this.process.stdin.end();
+        }
 
         // Set timeout
         this.timeoutId = setTimeout(() => {
@@ -70,7 +76,7 @@ export class ClaudeSubprocess extends EventEmitter {
         // Handle spawn errors (e.g., claude not found)
         this.process.on("error", (err) => {
           this.clearTimeout();
-          if (err.message.includes("ENOENT")) {
+          if (err.message && err.message.includes("ENOENT")) {
             reject(
               new Error(
                 "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
@@ -80,9 +86,6 @@ export class ClaudeSubprocess extends EventEmitter {
             reject(err);
           }
         });
-
-        // Close stdin since we pass prompt as argument
-        this.process.stdin?.end();
 
         console.error(`[Subprocess] Process spawned with PID: ${this.process.pid}`);
 
@@ -137,9 +140,8 @@ export class ClaudeSubprocess extends EventEmitter {
       "--model",
       options.model, // Model alias (opus/sonnet/haiku)
       "--permission-mode",
-      "bypassPermissions", // Full system access, no sandbox restrictions
+      "dontAsk", // Avoid prompts
       "--no-session-persistence", // Don't save sessions
-      prompt, // Pass prompt as argument (more reliable than stdin)
     ];
 
     if (options.sessionId) {
@@ -162,14 +164,40 @@ export class ClaudeSubprocess extends EventEmitter {
 
       try {
         const message: ClaudeCliMessage = JSON.parse(trimmed);
+        if (process.env.DEBUG === "true") {
+          console.error(`[DEBUG] Parsed message: ${message.type}${message.type === "stream_event" ? "." + message.event.type : ""}`);
+          if (message.type === "stream_event") {
+            console.error(`[DEBUG] Stream Event:`, JSON.stringify(message.event, null, 2));
+          }
+        }
         this.emit("message", message);
 
-        if (isContentDelta(message)) {
-          // Emit content delta for streaming
-          this.emit("content_delta", message as ClaudeCliStreamEvent);
+        if (isStreamEvent(message)) {
+          const eventType = message.event.type;
+          if (eventType === "content_block_delta") {
+            this.emit("content_delta", message);
+          } else if (eventType === "message_start") {
+            this.emit("start", message);
+          } else if (eventType === "message_stop") {
+            this.emit("stop", message);
+          }
+        } else if (message.type === "system") {
+          if (process.env.DEBUG === "true") {
+            console.error(`[DEBUG] System Message (${message.subtype}):`, JSON.stringify(message, null, 2));
+          }
+          this.emit("system", message);
+          if (message.subtype === "hook_response") {
+            this.emit("hook_response", message);
+          }
         } else if (isAssistantMessage(message)) {
+          if (process.env.DEBUG === "true") {
+            console.error(`[DEBUG] Assistant Message:`, JSON.stringify(message.message, null, 2));
+          }
           this.emit("assistant", message);
         } else if (isResultMessage(message)) {
+          if (process.env.DEBUG === "true") {
+            console.error(`[DEBUG] Result Message:`, JSON.stringify(message, null, 2));
+          }
           this.emit("result", message);
         }
       } catch {

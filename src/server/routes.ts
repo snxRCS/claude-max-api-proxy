@@ -24,16 +24,21 @@ export async function handleChatCompletions(
   req: Request,
   res: Response
 ): Promise<void> {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  if (process.env.DEBUG === "true") {
+    console.log("[DEBUG] Request Body:", JSON.stringify(req.body, null, 2));
+  }
   const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
   const body = req.body as OpenAIChatRequest;
   const stream = body.stream === true;
 
   try {
-    // Validate request
-    if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+    // Validate request - allow either 'messages' or 'input'
+    const messages = body.messages || body.input;
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
       res.status(400).json({
         error: {
-          message: "messages is required and must be a non-empty array",
+          message: "messages or input is required and must be a non-empty array",
           type: "invalid_request_error",
           code: "invalid_messages",
         },
@@ -87,30 +92,38 @@ async function handleStreamingResponse(
   res.setHeader("X-Request-Id", requestId);
 
   // CRITICAL: Flush headers immediately to establish SSE connection
-  // Without this, headers are buffered and client times out waiting
   res.flushHeaders();
 
-  // Send initial comment to confirm connection is alive
-  res.write(":ok\n\n");
+  let lastModel = "claude-sonnet-4";
+
+  // Send a heartbeat every 15 seconds to keep the connection alive
+  const heartbeatInterval = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(": ping\n\n");
+    }
+  }, 15000);
 
   return new Promise<void>((resolve, reject) => {
     let isFirst = true;
-    let lastModel = "claude-sonnet-4";
     let isComplete = false;
 
-    // Handle actual client disconnect (response stream closed)
-    res.on("close", () => {
+    const cleanup = () => {
+      clearInterval(heartbeatInterval);
+      subprocess.off("start", onStart);
+      subprocess.off("assistant", onAssistant);
+      subprocess.off("content_delta", onContentDelta);
+      subprocess.off("hook_response", onHookResponse);
+      subprocess.off("result", onResult);
+      subprocess.off("error", onError);
+      subprocess.off("close", onClose);
       if (!isComplete) {
-        // Client disconnected before response completed - kill subprocess
         subprocess.kill();
       }
       resolve();
-    });
+    };
 
-    // Handle streaming content deltas
-    subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
-      const text = event.event.delta?.text || "";
-      if (text && !res.writableEnded) {
+    const onStart = () => {
+      if (isFirst && !res.writableEnded) {
         const chunk = {
           id: `chatcmpl-${requestId}`,
           object: "chat.completion.chunk",
@@ -119,8 +132,7 @@ async function handleStreamingResponse(
           choices: [{
             index: 0,
             delta: {
-              role: isFirst ? "assistant" : undefined,
-              content: text,
+              role: "assistant",
             },
             finish_reason: null,
           }],
@@ -128,26 +140,97 @@ async function handleStreamingResponse(
         res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         isFirst = false;
       }
-    });
+    };
 
-    // Handle final assistant message (for model name)
-    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
+    const onAssistant = (message: ClaudeCliAssistant) => {
       lastModel = message.message.model;
-    });
 
-    subprocess.on("result", (_result: ClaudeCliResult) => {
+      // Only forward aucky-spawn calls to prevent flooding
+      for (const part of message.message.content) {
+        if (part.type === "tool_use" && part.name === "Bash" && part.input?.command?.includes("aucky-spawn") && !res.writableEnded) {
+          const toolText = `\n\n[Delegating Task]\n\`\`\`\n${part.input.command}\n\`\`\`\n`;
+          const chunk = {
+            id: `chatcmpl-${requestId}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: lastModel,
+            choices: [{
+              index: 0,
+              delta: {
+                content: toolText,
+              },
+              finish_reason: null,
+            }],
+          };
+          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        }
+      }
+    };
+
+    const onHookResponse = (message: any) => {
+      // Only forward results if they are related to aucky-spawn
+      // Since we don't easily know which tool the hook belongs to here, 
+      // we only forward if it looks like a subagent confirmation.
+      if (!res.writableEnded && (message.output?.includes("OK") || message.output?.includes("queued"))) {
+        const resultText = `\n[Status: ${message.outcome}]\n\`\`\`\n${message.output}\n\`\`\`\n`;
+        const chunk = {
+          id: `chatcmpl-${requestId}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: lastModel,
+          choices: [{
+            index: 0,
+            delta: {
+              content: resultText,
+            },
+            finish_reason: null,
+          }],
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      }
+    };
+
+    const onContentDelta = (event: ClaudeCliStreamEvent) => {
+      const text = event.event.delta?.text || "";
+      const thinking = event.event.delta?.thinking || "";
+      
+      if (process.env.DEBUG === "true") {
+        if (text) console.error(`[DEBUG] content_delta (text): "${text.slice(0, 20)}..."`);
+        if (thinking) console.error(`[DEBUG] content_delta (thinking): "${thinking.slice(0, 20)}..."`);
+      }
+
+      if ((text || thinking) && !res.writableEnded) {
+        const chunk = {
+          id: `chatcmpl-${requestId}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: lastModel,
+          choices: [{
+            index: 0,
+            delta: {
+              ...(text ? { content: text } : {}),
+              ...(thinking ? { reasoning_content: thinking } : {}),
+            },
+            finish_reason: null,
+          }],
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        isFirst = false;
+      }
+    };
+
+    const onResult = (result: ClaudeCliResult) => {
       isComplete = true;
       if (!res.writableEnded) {
-        // Send final done chunk with finish_reason
-        const doneChunk = createDoneChunk(requestId, lastModel);
+        const doneChunk = createDoneChunk(requestId, lastModel, result.usage);
         res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
       }
-      resolve();
-    });
+      cleanup();
+    };
 
-    subprocess.on("error", (error: Error) => {
+    const onError = (error: Error) => {
       console.error("[Streaming] Error:", error.message);
       if (!res.writableEnded) {
         res.write(
@@ -157,14 +240,12 @@ async function handleStreamingResponse(
         );
         res.end();
       }
-      resolve();
-    });
+      cleanup();
+    };
 
-    subprocess.on("close", (code: number | null) => {
-      // Subprocess exited - ensure response is closed
+    const onClose = (code: number | null) => {
       if (!res.writableEnded) {
         if (code !== 0 && !isComplete) {
-          // Abnormal exit without result - send error
           res.write(`data: ${JSON.stringify({
             error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
           })}\n\n`);
@@ -172,7 +253,19 @@ async function handleStreamingResponse(
         res.write("data: [DONE]\n\n");
         res.end();
       }
-      resolve();
+      cleanup();
+    };
+
+    subprocess.on("start", onStart);
+    subprocess.on("assistant", onAssistant);
+    subprocess.on("content_delta", onContentDelta);
+    subprocess.on("hook_response", onHookResponse);
+    subprocess.on("result", onResult);
+    subprocess.on("error", onError);
+    subprocess.on("close", onClose);
+
+    res.on("close", () => {
+      cleanup();
     });
 
     // Start the subprocess
@@ -181,7 +274,13 @@ async function handleStreamingResponse(
       sessionId: cliInput.sessionId,
     }).catch((err) => {
       console.error("[Streaming] Subprocess start error:", err);
-      reject(err);
+      if (!res.writableEnded) {
+        // Headers already flushed as SSE — must use SSE error format
+        res.write(`data: ${JSON.stringify({ error: { message: err.message, type: "server_error", code: null } })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+      cleanup();
     });
   });
 }

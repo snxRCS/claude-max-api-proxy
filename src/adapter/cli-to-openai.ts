@@ -46,7 +46,11 @@ export function cliToOpenaiChunk(
 /**
  * Create a final "done" chunk for streaming
  */
-export function createDoneChunk(requestId: string, model: string): OpenAIChatChunk {
+export function createDoneChunk(
+  requestId: string,
+  model: string,
+  usage?: { input_tokens: number; output_tokens: number }
+): OpenAIChatChunk {
   return {
     id: `chatcmpl-${requestId}`,
     object: "chat.completion.chunk",
@@ -59,6 +63,15 @@ export function createDoneChunk(requestId: string, model: string): OpenAIChatChu
         finish_reason: "stop",
       },
     ],
+    ...(usage
+      ? {
+          usage: {
+            prompt_tokens: usage.input_tokens || 0,
+            completion_tokens: usage.output_tokens || 0,
+            total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+          },
+        }
+      : {}),
   };
 }
 

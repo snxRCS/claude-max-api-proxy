@@ -50,6 +50,11 @@ function createApp(): Express {
   app.get("/v1/models", handleModels);
   app.post("/v1/chat/completions", handleChatCompletions);
 
+  // Compatibility aliases
+  app.post("/v1/completions", handleChatCompletions);
+  app.post("/v1/responses", handleChatCompletions);
+  app.get("/v1/chat/completions", (_req, res) => res.status(200).json({ status: "ready" }));
+
   // 404 handler
   app.use((_req: Request, res: Response) => {
     res.status(404).json({

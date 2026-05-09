@@ -36,8 +36,8 @@ export function extractModel(model: string): ClaudeModel {
     return MODEL_MAP[model];
   }
 
-  // Try stripping provider prefix
-  const stripped = model.replace(/^claude-code-cli\//, "");
+  // Try stripping provider prefix (claude-code-cli/ or claude-max/)
+  const stripped = model.replace(/^(claude-code-cli|claude-max)\//, "");
   if (MODEL_MAP[stripped]) {
     return MODEL_MAP[stripped];
   }
@@ -51,14 +51,14 @@ export function extractModel(model: string): ClaudeModel {
  * Handles both plain string and OpenAI array-of-parts format:
  *   "hello"  OR  [{"type":"text","text":"hello"}, {"type":"image_url",...}]
  */
-function extractContent(content: OpenAIChatRequest["messages"][number]["content"]): string {
+function extractContent(content: any): string {
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
     return content
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text!)
+      .filter((part) => (part.type === "text" || part.type === "input_text") && typeof (part.text || part.input_text) === "string")
+      .map((part) => part.text || part.input_text)
       .join("\n");
   }
   return String(content ?? "");
@@ -70,8 +70,35 @@ function extractContent(content: OpenAIChatRequest["messages"][number]["content"
  * Claude Code CLI in --print mode expects a single prompt, not a conversation.
  * We format the messages into a readable format that preserves context.
  */
-export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): string {
+export function messagesToPrompt(messages: any[]): string {
   const parts: string[] = [];
+
+  // Add OpenClaw Bridge instructions
+  parts.push(`
+<openclaw_bridge>
+## YOUR ROLE: LEAD DELEGATOR & ORCHESTRATOR
+Your primary goal is to manage the infrastructure by delegating work to specialized subagents. 
+The user is the FINAL DECISION MAKER. 
+
+### EXECUTION PATTERN:
+1. **Analyze & Plan:** Break down the user's request into logical sub-tasks.
+2. **Confirm:** Present the plan to the user and wait for their "Go".
+3. **Delegate:** Use 'aucky-spawn' to start a separate task for each sub-task.
+4. **Monitor:** You can use 'subagents list' or check other sessions to keep track, but let the subagents report their results directly to the user.
+
+### MANDATORY TOOL: aucky-spawn
+To spawn a real OpenClaw subagent (which the user can see in Telegram as a separate task), use the following bash command:
+aucky-spawn "The detailed message/task for the subagent"
+
+Example for parallel execution:
+aucky-spawn "Configure pfSense VLANs" & aucky-spawn "Configure HAProxy" & wait
+
+IMPORTANT: 
+- ALWAYS prefer subagents for any actual work. 
+- You act as the brain that coordinates everything.
+- You are allowed to steer or kill subagents if you decide it is necessary, but the user is the ultimate boss.
+</openclaw_bridge>
+`);
 
   for (const msg of messages) {
     const text = extractContent(msg.content);
@@ -100,8 +127,9 @@ export function messagesToPrompt(messages: OpenAIChatRequest["messages"]): strin
  * Convert OpenAI chat request to CLI input format
  */
 export function openaiToCli(request: OpenAIChatRequest): CliInput {
+  const messages = request.messages || request.input || [];
   return {
-    prompt: messagesToPrompt(request.messages),
+    prompt: messagesToPrompt(messages),
     model: extractModel(request.model),
     sessionId: request.user, // Use OpenAI's user field for session mapping
   };

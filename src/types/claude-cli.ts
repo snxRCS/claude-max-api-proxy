@@ -37,8 +37,11 @@ export interface ClaudeCliHookResponse {
 }
 
 export interface ClaudeCliAssistantContent {
-  type: "text";
-  text: string;
+  type: "text" | "tool_use";
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: any;
 }
 
 export interface ClaudeCliAssistant {
@@ -96,8 +99,9 @@ export interface ClaudeCliStreamEvent {
     type: "message_start" | "content_block_start" | "content_block_delta" | "content_block_stop" | "message_delta" | "message_stop";
     index?: number;
     delta?: {
-      type: "text_delta";
-      text: string;
+      type: "text_delta" | "thinking_delta";
+      text?: string;
+      thinking?: string;
     };
     content_block?: {
       type: "text";
