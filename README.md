@@ -375,3 +375,4 @@ MIT
 - Powered by [Claude Code CLI](https://github.com/anthropics/claude-code)
 # yolo2
 # YOLO
+# YOLO attempt 4 - proper admin bypass
